@@ -304,6 +304,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
   }
 
   // 如果运行到此，表明表已经存在，需要load，第一步是从MANIFEST文件中恢复VersionSet
+  //如果之前存在这个数据库，打开时需要做恢复工作，manifest文件里的信息应用的当前version
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;

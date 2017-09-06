@@ -902,6 +902,9 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
   return s;
 }
 
+//参考：http://blog.itpub.net/26239116/viewspace-1846192/
+//由于DBImpl::Recover前面已经判断过CURRENT文件是否存在，如果不存在就创建新数据库了，
+//因此这里就是要处理新的或者曾经关闭过的数据库。
 Status VersionSet::Recover(bool *save_manifest) {
   struct LogReporter : public log::Reader::Reporter {
     Status* status;
@@ -910,17 +913,24 @@ Status VersionSet::Recover(bool *save_manifest) {
     }
   };
 
+  //// 从CURRENT文件把当前的manifest文件名读到字符串里current里,比如MANIFEST-000004
   // Read "CURRENT" file, which contains a pointer to the current manifest file
   std::string current;
   Status s = ReadFileToString(env_, CurrentFileName(dbname_), &current);
   if (!s.ok()) {
     return s;
   }
+  /*
+  CURRENT文件应该只有一行，就是当前manifest文件名。
+  要求CURRENT文件必须以换行符结尾
+  这样resize后就只剩文件名了。
+  */
   if (current.empty() || current[current.size()-1] != '\n') {
     return Status::Corruption("CURRENT file does not end with newline");
   }
   current.resize(current.size() - 1);
 
+  // 打开manifest文件
   std::string dscname = dbname_ + "/" + current;
   SequentialFile* file;
   s = env_->NewSequentialFile(dscname, &file);
@@ -928,6 +938,7 @@ Status VersionSet::Recover(bool *save_manifest) {
     return s;
   }
 
+  // 初始化logfile信息，构建一个新的Version作为current version
   bool have_log_number = false;
   bool have_prev_log_number = false;
   bool have_next_file = false;
@@ -936,6 +947,13 @@ Status VersionSet::Recover(bool *save_manifest) {
   uint64_t last_sequence = 0;
   uint64_t log_number = 0;
   uint64_t prev_log_number = 0;
+  /*
+    此时的current_，也就是current version是之前在构造函数里初始化的
+    AppendVersion(new Version(this));
+    在AppendVersion中会把新初始化的Version作为current version
+    current_ = v;
+    因此到builder这一步，一切都值是初始化，还没有正式开始真正恢复操作
+    */
   Builder builder(this, current_);
 
   {
@@ -944,8 +962,18 @@ Status VersionSet::Recover(bool *save_manifest) {
     log::Reader reader(file, &reporter, true/*checksum*/, 0/*initial_offset*/);
     Slice record;
     std::string scratch;
+    // 解析manifest的内容，还原出上次关闭的数据库的logfile等信息，装入VersionEdit
     while (reader.ReadRecord(&record, &scratch) && s.ok()) {
+        /*
+        创建一个edit，要改变Version的状态，就需要用VersionEdit
+        version1 + edit1 = verion2
+        */
       VersionEdit edit;
+      /*
+      leveldb的存储是按一定格式的，需要decode还原
+      将manifest中读到的信息decode后放入edit，后面恢复会用到。
+      只是概要信息，比如新文件，删除了哪些文件等。
+      */
       s = edit.DecodeFrom(record);
       if (s.ok()) {
         if (edit.has_comparator_ &&
@@ -957,6 +985,9 @@ Status VersionSet::Recover(bool *save_manifest) {
       }
 
       if (s.ok()) {
+          /*
+          将edit的内容封装到builder里。
+          */
         builder.Apply(&edit);
       }
 
@@ -1002,10 +1033,20 @@ Status VersionSet::Recover(bool *save_manifest) {
   }
 
   if (s.ok()) {
+	//利用builder的信息封装一个新的version，追加到VersionSet里
     Version* v = new Version(this);
+    /*
+    builder前面从edit里读了manifest文件，
+    SaveTo会将从manifest文件里读到的文件添加到Version.files_里
+    在打开数据库操作的后面步骤里，会读取files_里的文件信息，与目录下的实体文件进行对照，看文件全不全。
+    这个过程就是version + edit，只不过这个version是新建的空version。
+    最终得到的是上次关闭的数据库version
+    */
     builder.SaveTo(v);
     // Install recovered version
+    // 根据各level的文件大小计算一个“得分”，以后影响压缩行为
     Finalize(v);
+    // 将新封装好的Version放到VersionSet里，作为current version
     AppendVersion(v);
     manifest_file_number_ = next_file;
     next_file_number_ = next_file + 1;
