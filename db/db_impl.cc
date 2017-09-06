@@ -284,7 +284,9 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
     return s;
   }
 
+  //判断CURRENT文件是否存在
   if (!env_->FileExists(CurrentFileName(dbname_))) {
+	  // 如果DB目录下不存在CURRENT文件且允许在表不存在时创建表，则新建一个表返回
     if (options_.create_if_missing) {
       s = NewDB();
       if (!s.ok()) {
@@ -301,6 +303,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
     }
   }
 
+  // 如果运行到此，表明表已经存在，需要load，第一步是从MANIFEST文件中恢复VersionSet
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;
@@ -314,8 +317,13 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
   // Note that PrevLogNumber() is no longer used, but we pay
   // attention to it in case we are recovering a database
   // produced by an older version of leveldb.
+
+  // 获取MANIFEST中获取最后一次持久化清单时在使用LOG文件序号，注意：这个LOG当时正在使用，
+  // 表明数据还在memtable中，没有形成sst文件，所以数据恢复需要从这个LOG文件开始(包含这个LOG)。
+  // 另外，prev_log是早前版本level_db使用的机制，现在以及不再使用，这里只是为了兼容
   const uint64_t min_log = versions_->LogNumber();
   const uint64_t prev_log = versions_->PrevLogNumber();
+  // 扫描DB目录，记录下所有比MANIFEST中记录的LOG更加新的LOG文件
   std::vector<std::string> filenames;
   s = env_->GetChildren(dbname_, &filenames);
   if (!s.ok()) {
@@ -341,8 +349,12 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
   }
 
   // Recover in the order in which the logs were generated
+  // 将LOG文件从小到大排序
   std::sort(logs.begin(), logs.end());
+  // 逐个LOG文件回放
   for (size_t i = 0; i < logs.size(); i++) {
+	  // 回放LOG时，记录被插入到memtable，如果超过write buffer，则还会dump出level 0的sst文件，
+	  // 此方法会将日志中每条记录的sequence num与max_sequence进行比较，以记录下最大的sequence num。
     s = RecoverLogFile(logs[i], (i == logs.size() - 1), save_manifest, edit,
                        &max_sequence);
     if (!s.ok()) {
@@ -352,9 +364,12 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
     // The previous incarnation may not have written any MANIFEST
     // records after allocating this log number.  So we manually
     // update the file number allocation counter in VersionSet.
+    // 更新最大的文件序号，因为MANIFEST文件中没有记录这些LOG文件占用的序号；
+    // 当然，也可能LOG的序号小于MANIFEST中记录的最大文件序号，这时不需要更新。
     versions_->MarkFileNumberUsed(logs[i]);
   }
 
+  // 比较日志回放前后的最大sequence num，如果回放记录中有超过LastSequence()的记录，则替换
   if (versions_->LastSequence() < max_sequence) {
     versions_->SetLastSequence(max_sequence);
   }

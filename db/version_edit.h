@@ -14,9 +14,16 @@ namespace leveldb {
 
 class VersionSet;
 
+/*leveldb中有很多SSTable，其中保存着Key值有序的数据，不同的SSTable文件之间的Key值区间没有重叠（level 0除外）。
+ * FileMetaData用于描述每一个.sst文件(leveldb是.ldb, rocketsdb为.sst)的信息，它记录了一个SSTable中的最小和最大的Key值，即Key值的变化区间，极大的提高了查找操作的效率。
+ * */
 struct FileMetaData {
+  //另外就是对于许多类比如memtable、table、cahe等leveldb都加上了引用计数，其实现也非常简单，就是在对象中加入数据域refs，这也非常好理解。
+	//比如在迭代的过程中，已经进入下一个block中了，上一个block理应可以释放了，但它有可能被传递出去提供某些查询服务使用，在其计数不为0时不允许释放，同理对于immutable_memtable，当它持久化完毕时，如果还在为用户提供读服务，也不能释放。不得不说Leveldb的工程层次很清楚，几乎没有循环引用的问题
   int refs;
+  //当前文件在Compaction到下一级之前允许Seek的次数，这个次数和文件大小相关，文件越大，Compaction之前允许Seek的次数越多
   int allowed_seeks;          // Seeks allowed until compaction
+  //一个递增的序号，用于创建文件名
   uint64_t number;
   uint64_t file_size;         // File size in bytes
   InternalKey smallest;       // Smallest internal key served by table

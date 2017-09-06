@@ -56,6 +56,12 @@ extern bool SomeFileOverlapsRange(
     const Slice* smallest_user_key,
     const Slice* largest_user_key);
 
+
+
+/*
+ * leveldb通过Version来记录一个版本，Version其实是一系列SSTable的集合，SSTable文件是按照不同的level来存储的，不同的level可能有多个SSTable文件。
+ * Version中保存了所有level的所有FileMetaData文件，并通过next和prev指针形成双向循环链表，链表尾部元素即为最新的Version，一般也就是所谓的Current版本
+ * */
 class Version {
  public:
   // Append to *iters a sequence of iterators that will
@@ -135,16 +141,24 @@ class Version {
   int refs_;                    // Number of live refs to this version
 
   // List of files per level
+  ////二维数组，记录所有level的全部FileMetaData文件
   std::vector<FileMetaData*> files_[config::kNumLevels];
 
   // Next file to compact based on seek stats.
+  //基于Seek的结果stats得到的下一个等待Compact的文件（当FileMetaData文件查找到一定次数时，就需要执行合并操作）
   FileMetaData* file_to_compact_;
+  //等待合并文件所属的level
   int file_to_compact_level_;
 
   // Level that should be compacted next and its compaction score.
   // Score < 1 means compaction is not strictly needed.  These fields
   // are initialized by Finalize().
+  /*
+   * 每个Version在其生成的时候会初始化两个值compaction_level_、compaction_score_，记录了当前Version最需要进行Compaction的Level，
+   * 以及其需要进行Compaction的紧迫程度，score大于1被认为是需要马上执行的。
+   * */
   double compaction_score_;
+  //需要进行合并的level
   int compaction_level_;
 
   explicit Version(VersionSet* vset)
@@ -161,6 +175,15 @@ class Version {
   Version(const Version&);
   void operator=(const Version&);
 };
+
+
+/*
+ * 在leveldb中，Version就代表了一个版本，它包括当前磁盘及内存中的所有文件信息。当执行一次compaction后，Leveldb将在当前版本基础上创建一个新版本，在所有的version中，只有一个是CURRENT。
+VersionSet是所有Version的集合，用于管理所有的version。
+VersionEdit记录了Version之间的变化，其中记录了基于上一Version增加了多少文件，删除了文件。也就是说：Version0 + VersionEdit --> Version1。
+每次文件有变动时，leveldb就把变动记录到一个VersionEdit变量中，然后通过VersionEdit把变动应用到current version上，并把current version的快照，也就是db元信息保存到MANIFEST文件中。
+另外，MANIFEST文件组织是以VersionEdit的形式写入的，它本身是一个log文件格式，采用log::Writer/Reader的方式读写，一个VersionEdit就是一条log record。
+ * */
 
 class VersionSet {
  public:
@@ -294,11 +317,24 @@ class VersionSet {
 
   void AppendVersion(Version* v);
 
+  //由dbimpl传入
   Env* const env_;
   const std::string dbname_;
   const Options* const options_;
+  /*
+   * //缓存部分SSTable
+   *当向leveldb写入数据时，首先是将数据写入leveldb的Memtable（Memtable可能转化为IMMemtable）中，Memtable是存储在内存中的。只有经过compaction操作后，才会将内存中的数据写入到磁盘中的sstable中。
+当要读数据时，首先在Memtable中查找，若没有找到，则在sstable中继续查找。而sstable是存储在磁盘中的，这样就需要进行多次磁盘操作，速度会非常慢。为了加快查找速度，leveldb在采用了Cache的方式，尽最大可能减少随机读操作。
+cache分为Table Cache和 Block Cache两种，其中Table Cache中缓存的是sstable的索引数据，Block Cache缓存的是Block数据，Block Cache是可选的，即可以在配置中来选择是否打开这个功能
+   * */
   TableCache* const table_cache_;
   const InternalKeyComparator icmp_;
+
+  /*
+   * 所有文件的文件编号都是通过类VersionSet中的变量next_file_number_来获取的，该变量在VersionSet构造函数中完成初始化，且初始值为2（next_file_number_(2)）。
+通过代码发现，leveldb把编号1留给了Recover()过程中的Manifest清单文件。
+last_sequence_则记录了向leveldb中写入的记录总数，写数据时被使用
+   * */
   uint64_t next_file_number_;
   uint64_t manifest_file_number_;
   uint64_t last_sequence_;
@@ -306,14 +342,21 @@ class VersionSet {
   uint64_t prev_log_number_;  // 0 or backing store for memtable being compacted
 
   // Opened lazily
-  WritableFile* descriptor_file_;
-  log::Writer* descriptor_log_;
+  WritableFile* descriptor_file_;//数据库的Manifest清单文件
+  log::Writer* descriptor_log_; //用于写Manifest文件
+  /*
+   * 所有Version形成的双向链表的头部
+   *
+   * */
   Version dummy_versions_;  // Head of circular doubly-linked list of versions.
+  /*
+   * == dummy_versions_.prev_，双向链表的尾部，即最新的Version
+   * */
   Version* current_;        // == dummy_versions_.prev_
 
   // Per-level key at which the next compaction at that level should start.
   // Either an empty string, or a valid InternalKey.
-  std::string compact_pointer_[config::kNumLevels];
+  std::string compact_pointer_[config::kNumLevels];  //每一level下次要执行合并操作的起始Key值
 
   // No copying allowed
   VersionSet(const VersionSet&);
